@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.env
+.ipynb_checkpoints/
+.DS_Store
+# Datos: data/precios.csv SÍ se sube (lo actualiza la acción de GitHub cada día).
+# Otros ficheros de datos grandes o temporales no:
+data/*.parquet
+data/*.tmp

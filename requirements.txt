@@ -1,0 +1,7 @@
+streamlit>=1.67
+plotly>=5.20
+pandas>=2.1
+numpy>=1.26
+requests>=2.31
+lightgbm>=4.0
+pytest>=8.0
