@@ -1,0 +1,44 @@
+# Permite servir los archivos de la carpeta static/ (aquí van las fuentes)
+[server]
+enableStaticServing = true
+
+[theme]
+base = "light"
+primaryColor = "#0b5cab"
+backgroundColor = "#f5f7fa"
+secondaryBackgroundColor = "#e6ebf2"
+textColor = "#0b2545"
+font = "DM Sans"
+headingFont = "Fraunces"
+
+# Fuente del texto: DM Sans (licencia SIL OFL, ver static/fonts/)
+[[theme.fontFaces]]
+family = "DM Sans"
+url = "app/static/fonts/dm-sans-latin-400-normal.woff2"
+weight = 400
+
+[[theme.fontFaces]]
+family = "DM Sans"
+url = "app/static/fonts/dm-sans-latin-500-normal.woff2"
+weight = 500
+
+[[theme.fontFaces]]
+family = "DM Sans"
+url = "app/static/fonts/dm-sans-latin-700-normal.woff2"
+weight = 700
+
+# Fuente de los títulos: Fraunces (licencia SIL OFL, ver static/fonts/)
+[[theme.fontFaces]]
+family = "Fraunces"
+url = "app/static/fonts/fraunces-latin-400-normal.woff2"
+weight = 400
+
+[[theme.fontFaces]]
+family = "Fraunces"
+url = "app/static/fonts/fraunces-latin-600-normal.woff2"
+weight = 600
+
+[[theme.fontFaces]]
+family = "Fraunces"
+url = "app/static/fonts/fraunces-latin-700-normal.woff2"
+weight = 700
