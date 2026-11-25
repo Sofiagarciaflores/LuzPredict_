@@ -1,10 +1,11 @@
 """Todo el cálculo de LuzPredict, en un solo archivo.
 
-Está dividido en cuatro bloques:
+Está dividido en cinco bloques:
   1. Datos reales: descarga de precios de Red Eléctrica (REData) y guardado en CSV.
   2. Datos de demostración: precios inventados, por si todavía no hay CSV.
-  3. Previsión: método de referencia (misma hora de la semana anterior) y su evaluación.
-  4. Resúmenes y planificador: medias para los gráficos y búsqueda de la hora más barata.
+  3. Previsión de referencia: métodos sencillos y su evaluación en el pasado.
+  4. Modelo de aprendizaje automático: gradient boosting con intervalo del 80 %.
+  5. Resúmenes y planificador: medias para los gráficos y búsqueda de la hora más barata.
 
 Fuente de los precios: REData (https://www.ree.es/es/apidatos), sin clave.
 OJO: la forma del JSON sale de la documentación oficial, pero los NOMBRES de las
@@ -18,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import requests
+from sklearn.ensemble import HistGradientBoostingRegressor
 
 ZONA = "Europe/Madrid"
 URL_REDATA = "https://apidatos.ree.es/es/datos/mercados/precios-mercados-tiempo-real"
@@ -92,20 +94,25 @@ def leer_respuesta_redata(respuesta):
     return tabla.pivot_table(index="fecha", columns="serie", values="valor").sort_index()
 
 
-def trozos_de_fechas(inicio, fin, dias=30):
-    """Parte un rango de fechas ('AAAA-MM-DD') en trozos de como mucho `dias` días.
+def trozos_de_fechas(inicio, fin):
+    """Parte un rango de fechas ('AAAA-MM-DD') en trozos de como mucho un mes natural.
 
-    Pedir años enteros de golpe puede fallar, así que se descarga por trozos.
-    Devuelve una lista de pares (inicio, fin) como texto.
+    REData rechaza (error 400) los tramos que cruzan varios meses, así que se pide
+    mes a mes. Devuelve una lista de pares (inicio, fin) como texto.
     """
     trozos = []
     actual = date.fromisoformat(inicio)
     ultimo = date.fromisoformat(fin)
     while actual <= ultimo:
-        fin_trozo = min(actual + timedelta(days=dias - 1), ultimo)
+        mes_siguiente = (actual.replace(day=1) + timedelta(days=32)).replace(day=1)
+        fin_trozo = min(mes_siguiente - timedelta(days=1), ultimo)
         trozos.append((actual.isoformat(), fin_trozo.isoformat()))
         actual = fin_trozo + timedelta(days=1)
     return trozos
+
+
+class TramoRechazado(RuntimeError):
+    """REData ha contestado con un error (por ejemplo 400) a un tramo de fechas."""
 
 
 def descargar_tramo(inicio, fin, intentos=3):
@@ -122,8 +129,30 @@ def descargar_tramo(inicio, fin, intentos=3):
             return leer_respuesta_redata(respuesta.json())
         except requests.RequestException as error:
             if intento == intentos:
-                raise RuntimeError("No se pudo descargar " + inicio + " a " + fin + ": " + str(error))
+                mensaje = "No se pudo descargar " + inicio + " a " + fin + ": " + str(error)
+                if isinstance(error, requests.HTTPError):
+                    detalle = getattr(error.response, "text", "")[:200]  # REData explica el motivo aquí
+                    raise TramoRechazado(mensaje + " | " + detalle)
+                raise RuntimeError(mensaje)
             time.sleep(2 * intento)  # espera un poco más en cada reintento
+
+
+def descargar_partiendo_si_falla(inicio, fin, dias_sin_datos):
+    """Descarga un tramo; si REData lo rechaza, lo parte por la mitad y lo vuelve a intentar.
+
+    Si ni siquiera un día suelto se puede descargar, se anota en `dias_sin_datos`.
+    Los errores de conexión (sin internet) NO se parten: se paran enseguida.
+    """
+    try:
+        return [descargar_tramo(inicio, fin)]
+    except TramoRechazado:
+        if inicio == fin:
+            dias_sin_datos.append(inicio)
+            return []
+        primero, ultimo = date.fromisoformat(inicio), date.fromisoformat(fin)
+        mitad = primero + (ultimo - primero) // 2
+        return (descargar_partiendo_si_falla(inicio, mitad.isoformat(), dias_sin_datos)
+                + descargar_partiendo_si_falla((mitad + timedelta(days=1)).isoformat(), fin, dias_sin_datos))
 
 
 def descargar_precios(inicio, fin, pausa=0.5):
@@ -133,11 +162,16 @@ def descargar_precios(inicio, fin, pausa=0.5):
     pvpc_eur_mwh (tarifa regulada).
     """
     tablas = []
+    dias_sin_datos = []
     for ini_trozo, fin_trozo in trozos_de_fechas(inicio, fin):
-        tabla = descargar_tramo(ini_trozo, fin_trozo)
-        if len(tabla) > 0:
-            tablas.append(tabla)
+        for tabla in descargar_partiendo_si_falla(ini_trozo, fin_trozo, dias_sin_datos):
+            if len(tabla) > 0:
+                tablas.append(tabla)
         time.sleep(pausa)  # pausa corta para no saturar la web de Red Eléctrica
+
+    if len(dias_sin_datos) > 0:
+        print("AVISO: REData no ha dado datos de " + str(len(dias_sin_datos)) + " día(s): "
+              + ", ".join(dias_sin_datos[:10]) + (" ..." if len(dias_sin_datos) > 10 else ""))
 
     if len(tablas) == 0:
         raise ValueError("REData no ha devuelto datos entre " + inicio + " y " + fin + ".")
@@ -262,14 +296,42 @@ def prever_como_semana_anterior(historial, horas=168):
     return pd.Series(valores, index=horas_futuras, name="prevision_eur_mwh")
 
 
-def evaluar(serie, n_pruebas=40, cada_dias=3):
-    """Mide cuánto se equivoca la previsión, según los días de antelación.
+def prever_como_media_de_4_semanas(historial, horas=168):
+    """Predice cada hora con la media de esa misma hora en las 4 semanas anteriores.
+
+    Es otro método sencillo: suaviza el ruido de una sola semana. Solo mira
+    desplazamientos de 168, 336, 504 y 672 horas, así que no usa nada del futuro.
+    """
+    if horas > HORAS_SEMANA:
+        raise ValueError("No se puede prever más de 168 horas con este método.")
+
+    primera_hora = historial.index[-1] + pd.Timedelta(hours=1)
+    horas_futuras = pd.date_range(primera_hora, periods=horas, freq="h")
+    semanas_anteriores = {}
+    for semanas in range(1, 5):
+        horas_copiadas = horas_futuras - pd.Timedelta(hours=HORAS_SEMANA * semanas)
+        semanas_anteriores[semanas] = historial.reindex(horas_copiadas).to_numpy()
+    valores = pd.DataFrame(semanas_anteriores).mean(axis=1)  # ignora las semanas sin dato
+    return pd.Series(valores.to_numpy(), index=horas_futuras, name="prevision_eur_mwh")
+
+
+# Métodos de referencia que se comparan (nombre para mostrar -> función)
+METODOS_DE_REFERENCIA = {
+    "Misma hora de la semana anterior": prever_como_semana_anterior,
+    "Media de las 4 semanas anteriores": prever_como_media_de_4_semanas,
+}
+
+
+def evaluar(serie, n_pruebas=40, cada_dias=3, metodo=prever_como_semana_anterior):
+    """Mide cuánto se equivoca una previsión, según los días de antelación.
 
     Hace como si estuviéramos en el pasado: corta la serie en una fecha, prevé
     los 7 días siguientes y compara con lo que pasó de verdad. Lo repite
-    n_pruebas veces y devuelve el error medio (MAE, en €/MWh) para cada día 1..7.
+    n_pruebas veces y devuelve, para cada día 1..7:
+      mae = error medio absoluto (en €/MWh)
+      pct = ese error como % del precio medio real de las pruebas
     """
-    errores = []  # aquí guardamos (día de antelación, error)
+    filas = []  # aquí guardamos (día de antelación, error, precio real)
 
     ultimo_origen = serie.index[-1] - pd.Timedelta(hours=168)
     for i in range(n_pruebas):
@@ -278,23 +340,155 @@ def evaluar(serie, n_pruebas=40, cada_dias=3):
         if len(pasado) <= HORAS_SEMANA:
             continue
 
-        prevision = prever_como_semana_anterior(pasado)
+        prevision = metodo(pasado)
         real = serie.reindex(prevision.index)
         error = (prevision - real).abs()
 
         for posicion in range(len(prevision)):
             dia = posicion // 24 + 1  # horas 0-23 -> día 1, 24-47 -> día 2...
-            errores.append({"dia": dia, "error": error.iloc[posicion]})
+            filas.append({"dia": dia, "error": error.iloc[posicion], "real": real.iloc[posicion]})
 
-    if len(errores) == 0:
+    if len(filas) == 0:
         raise ValueError("No hay historial suficiente para evaluar.")
 
-    tabla = pd.DataFrame(errores)
-    return tabla.groupby("dia", as_index=False)["error"].mean().rename(columns={"error": "mae"})
+    tabla = pd.DataFrame(filas).groupby("dia", as_index=False).mean()
+    tabla["pct"] = 100 * tabla["error"] / tabla["real"]
+    return tabla.rename(columns={"error": "mae"})[["dia", "mae", "pct"]]
 
 
 # ===========================================================================
-# 4. RESÚMENES PARA LOS GRÁFICOS Y PLANIFICADOR
+# 4. MODELO DE APRENDIZAJE AUTOMÁTICO
+# ===========================================================================
+NOMBRE_MODELO = "Aprendizaje automático (gradient boosting)"
+CUANTILES = {"bajo": 0.10, "central": 0.50, "alto": 0.90}  # intervalo del 80 %
+
+
+def crear_variables(historial, horas_objetivo):
+    """Datos de entrada del modelo para cada hora que queremos prever.
+
+    REGLA CLAVE (sin trampas): para prever la hora t solo se mira lo que ocurrió
+    168 horas (una semana) o más antes de t. Como prevemos como mucho 7 días, eso
+    ya se conoce siempre, sea cual sea el día de antelación.
+    """
+    ultima = max(horas_objetivo.max(), historial.index[-1])
+    completa = historial.reindex(pd.date_range(historial.index[0], ultima, freq="h"))
+
+    tabla = pd.DataFrame(index=completa.index)
+    tabla["hace_1_semana"] = completa.shift(HORAS_SEMANA)
+    tabla["hace_2_semanas"] = completa.shift(2 * HORAS_SEMANA)
+    tabla["hace_3_semanas"] = completa.shift(3 * HORAS_SEMANA)
+    # medias de las 24 h y de los 7 días que terminaban justo hace una semana
+    tabla["media_dia_hace_1_semana"] = completa.rolling(24, min_periods=12).mean().shift(HORAS_SEMANA)
+    tabla["media_semana_hace_1_semana"] = completa.rolling(HORAS_SEMANA, min_periods=48).mean().shift(HORAS_SEMANA)
+    # el calendario sí se conoce siempre
+    tabla["hora"] = tabla.index.hour
+    tabla["dia_semana"] = tabla.index.day_of_week
+    tabla["mes"] = tabla.index.month
+    tabla["fin_de_semana"] = (tabla.index.day_of_week >= 5).astype(int)
+    return tabla.loc[horas_objetivo]
+
+
+class ModeloAprendizaje:
+    """Tres modelos de gradient boosting: percentil 10, mediana y percentil 90.
+
+    La mediana es la previsión; los otros dos forman el intervalo del 80 %
+    (se espera que el precio real caiga dentro 8 de cada 10 veces).
+    Los precios son muy ruidosos, así que el modelo se regulariza fuerte (árboles
+    pequeños, pocas vueltas) para que no se aprenda el ruido de memoria.
+    """
+
+    def __init__(self):
+        self.modelos = {}
+        self.ajuste = 0.0  # cuánto se ensancha (o estrecha) el intervalo tras calibrarlo
+
+    def entrenar(self, serie):
+        datos = crear_variables(serie, serie.index)
+        usables = serie.notna() & datos["hace_1_semana"].notna()
+        for nombre, cuantil in CUANTILES.items():
+            modelo = HistGradientBoostingRegressor(
+                loss="quantile", quantile=cuantil, max_iter=100, learning_rate=0.05,
+                max_depth=4, min_samples_leaf=150, l2_regularization=5.0, random_state=0)
+            self.modelos[nombre] = modelo.fit(datos[usables], serie[usables])
+        return self
+
+    def _tabla(self, historial, horas_futuras):
+        datos = crear_variables(historial, horas_futuras)
+        tabla = pd.DataFrame({nombre: modelo.predict(datos) for nombre, modelo in self.modelos.items()},
+                             index=horas_futuras)
+        # por si el percentil 10 saliera por encima de la mediana (puede pasar un poco)
+        valores = np.sort(tabla[["bajo", "central", "alto"]].to_numpy(), axis=1)
+        return pd.DataFrame(valores, index=horas_futuras, columns=["bajo", "central", "alto"])
+
+    def calibrar(self, serie, desde):
+        """Ajusta el intervalo con datos que el modelo NO ha visto (calibración conforme).
+
+        Mide cuánto se sale el precio real de [bajo, alto] desde `desde` hasta el final de
+        `serie`, y ensancha (o estrecha) el intervalo lo justo para que contenga al 80 %.
+        """
+        horas = serie.index[serie.index > desde]
+        tabla = self._tabla(serie, horas)
+        real = serie.reindex(horas)
+        validas = real.notna()
+        salida = np.maximum(tabla["bajo"] - real, real - tabla["alto"])[validas]
+        nivel = min(1.0, 0.8 * (1 + 1 / len(salida)))
+        self.ajuste = float(np.quantile(salida, nivel))
+        return self
+
+    def prever(self, historial, horas=168):
+        """Devuelve una tabla con las columnas bajo, central y alto para las próximas horas."""
+        if horas > HORAS_SEMANA:
+            raise ValueError("No se puede prever más de 168 horas con este modelo.")
+        primera_hora = historial.index[-1] + pd.Timedelta(hours=1)
+        horas_futuras = pd.date_range(primera_hora, periods=horas, freq="h")
+        tabla = self._tabla(historial, horas_futuras)
+        tabla["bajo"] = np.minimum(tabla["bajo"] - self.ajuste, tabla["central"])
+        tabla["alto"] = np.maximum(tabla["alto"] + self.ajuste, tabla["central"])
+        return tabla
+
+    def prever_central(self, historial, horas=168):
+        """Solo la previsión central (así se puede evaluar igual que los métodos de referencia)."""
+        return self.prever(historial, horas)["central"].rename("prevision_eur_mwh")
+
+
+MIN_DIAS_PARA_MODELO = 400  # con menos historial no hay datos para entrenar, calibrar y examinar
+
+
+def preparar_modelos(serie, dias_de_prueba=130, dias_de_calibracion=90):
+    """Devuelve (modelo para el examen, modelo definitivo).
+
+    Para que el examen sea limpio, el modelo del examen se entrena con datos de antes
+    de las pruebas de evaluar() y se calibra con los 90 días siguientes. El modelo
+    definitivo se entrena con todo y reutiliza esa calibración.
+    """
+    corte_examen = serie.index[-1] - pd.Timedelta(days=dias_de_prueba)
+    corte_calibracion = corte_examen - pd.Timedelta(days=dias_de_calibracion)
+    del_examen = ModeloAprendizaje().entrenar(serie.loc[:corte_calibracion])
+    del_examen.calibrar(serie.loc[:corte_examen], desde=corte_calibracion)
+    definitivo = ModeloAprendizaje().entrenar(serie)
+    definitivo.ajuste = del_examen.ajuste
+    return del_examen, definitivo
+
+
+def evaluar_intervalo(serie, modelo, n_pruebas=40, cada_dias=3):
+    """Mide si el intervalo del 80 % acierta: % de precios reales que caen dentro (ideal: ~80 %)."""
+    dentro = []
+    ultimo_origen = serie.index[-1] - pd.Timedelta(hours=168)
+    for i in range(n_pruebas):
+        origen = ultimo_origen - pd.Timedelta(days=cada_dias * i)
+        pasado = serie.loc[:origen]
+        if len(pasado) <= HORAS_SEMANA:
+            continue
+        prevision = modelo.prever(pasado)
+        real = serie.reindex(prevision.index)
+        validas = real.notna()
+        dentro.extend(((real >= prevision["bajo"]) & (real <= prevision["alto"]))[validas].tolist())
+    if len(dentro) == 0:
+        raise ValueError("No hay historial suficiente para evaluar.")
+    return 100 * float(np.mean(dentro))
+
+
+# ===========================================================================
+# 5. RESÚMENES PARA LOS GRÁFICOS Y PLANIFICADOR
 # ===========================================================================
 def media_por_hora(serie, dias=90):
     """Precio medio de cada hora del día (0 a 23) en los últimos `dias` días."""
@@ -355,3 +549,11 @@ def planificar(precios, desde, hasta, duracion, kwh, hora_referencia=21, peso=PE
         "coste_referencia": costes[inicio_referencia],
         "ahorro": costes[inicio_referencia] - costes[mejor_inicio],
     }
+
+
+def ahorro_al_ano(ahorro_por_uso, veces_por_semana):
+    """Ahorro en € al año si se repite el uso `veces_por_semana` veces cada semana.
+
+    Es una extrapolación: supone un ahorro parecido todas las semanas.
+    """
+    return ahorro_por_uso * veces_por_semana * 52

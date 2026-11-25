@@ -15,16 +15,21 @@ from dash import Dash, Input, Output, dcc, html
 
 from funciones import (
     COLUMNA_SPOT,
+    METODOS_DE_REFERENCIA,
+    MIN_DIAS_PARA_MODELO,
+    NOMBRE_MODELO,
     PESO_MERCADO_DIARIO,
     ZONA,
+    ahorro_al_ano,
     crear_precios_demo,
     evaluar,
+    evaluar_intervalo,
     leer_csv,
     limpiar_serie,
     media_mensual,
     media_por_hora,
     planificar,
-    prever_como_semana_anterior,
+    preparar_modelos,
 )
 
 CARPETA = Path(__file__).parent
@@ -47,12 +52,18 @@ ELECTRODOMESTICOS = {
 
 NOMBRES_DIAS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
 
+# Unidades de precio: clave -> (texto, factor para pasar de €/MWh, decimales)
+UNIDADES = {"kwh": ("c€/kWh", 0.1, 1), "mwh": ("€/MWh", 1.0, 0)}
+
 
 # ---------------------------------------------------------------------------
 # Datos (se cargan una vez al arrancar el servidor)
 # ---------------------------------------------------------------------------
 def cargar_datos():
-    """Lee los precios reales (data/precios.csv). Si no existen, usa datos de demostración."""
+    """Lee los precios reales (data/precios.csv). Si no existen, usa datos de demostración.
+
+    Devuelve (historial, origen), con origen "real" o "demo".
+    """
     tabla = leer_csv(CARPETA / "data" / "precios.csv")
     if tabla is not None and len(tabla) > 24 * 30:
         historial = limpiar_serie(tabla[COLUMNA_SPOT].dropna())
@@ -60,12 +71,31 @@ def cargar_datos():
     else:
         historial = crear_precios_demo(dias=730)
         origen = "demo"
-    prevision = prever_como_semana_anterior(historial, horas=168)
-    return historial, prevision, origen
+    return historial, origen
 
 
-historial, prevision, origen = cargar_datos()
-calidad = evaluar(historial, n_pruebas=40)
+historial, origen = cargar_datos()
+
+# Probamos en el pasado los métodos sencillos y el modelo de aprendizaje automático
+calidades = {nombre: evaluar(historial, n_pruebas=40, metodo=metodo)
+             for nombre, metodo in METODOS_DE_REFERENCIA.items()}
+modelo_final = None
+cobertura = None  # % de precios reales que caen dentro del intervalo del 80 %
+if len(historial) >= 24 * MIN_DIAS_PARA_MODELO:
+    modelo_examen, modelo_final = preparar_modelos(historial)
+    calidades[NOMBRE_MODELO] = evaluar(historial, n_pruebas=40, metodo=modelo_examen.prever_central)
+    cobertura = evaluar_intervalo(historial, modelo_examen)
+
+# Usamos el que menos se equivoca (el modelo solo si de verdad gana a los sencillos)
+metodo_elegido = min(calidades, key=lambda nombre: calidades[nombre]["mae"].mean())
+usa_modelo = metodo_elegido == NOMBRE_MODELO
+if usa_modelo:
+    banda = modelo_final.prever(historial, horas=168)  # columnas bajo, central, alto
+    prevision = banda["central"].rename("prevision_eur_mwh")
+else:
+    banda = None
+    prevision = METODOS_DE_REFERENCIA[metodo_elegido](historial, horas=168)
+calidad = calidades[metodo_elegido]
 
 
 def precios_proximos():
@@ -84,13 +114,26 @@ def precios_proximos():
 # ---------------------------------------------------------------------------
 def escribir_dia(fecha):
     """Convierte una fecha en texto, por ejemplo 'mié 18/11'."""
-    return NOMBRES_DIAS[fecha.dayofweek] + " " + fecha.strftime("%d/%m")
+    return NOMBRES_DIAS[fecha.day_of_week] + " " + fecha.strftime("%d/%m")
 
 
-def escribir_euros(valor):
-    """Escribe un número como euros con 2 decimales (evita que salga '-0.00')."""
-    valor = round(valor, 2) + 0.0
-    return str(format(valor, ".2f")) + " €"
+def escribir_numero(valor, decimales):
+    """Escribe un número con coma decimal, como en España (evita que salga '-0,0')."""
+    valor = round(valor, decimales) + 0.0
+    return format(valor, "." + str(decimales) + "f").replace(".", ",")
+
+
+def escribir_dinero(euros):
+    """Euros si llega a 1 €; si no, céntimos (0,04 € se lee mejor como '4,0 cént.')."""
+    if abs(euros) >= 1:
+        return escribir_numero(euros, 2) + " €"
+    return escribir_numero(euros * 100, 1) + " cént."
+
+
+def escribir_precio(valor_mwh, unidad):
+    """Escribe un precio (que viene en €/MWh) en la unidad elegida."""
+    texto, factor, decimales = UNIDADES[unidad]
+    return escribir_numero(valor_mwh * factor, decimales) + " " + texto
 
 
 def dar_estilo(figura, alto=330):
@@ -101,6 +144,7 @@ def dar_estilo(figura, alto=330):
         plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=10, r=10, t=10, b=10),
         legend=dict(orientation="h"),
+        separators=",.",  # coma decimal en los gráficos
         height=alto,
     )
     figura.update_xaxes(gridcolor="#dfe5ec", zerolinecolor="#dfe5ec")
@@ -110,7 +154,8 @@ def dar_estilo(figura, alto=330):
 
 def tarjeta(titulo, valor, detalle=None, color=None):
     """Una tarjeta con un número grande (para los datos clave)."""
-    contenido = [html.Div(titulo, className="tarjeta-titulo"), html.Div(valor, className="tarjeta-valor")]
+    estilo = {"fontSize": "1.3rem", "lineHeight": "1.3"} if len(valor) > 18 else None  # textos largos, más pequeños
+    contenido = [html.Div(titulo, className="tarjeta-titulo"), html.Div(valor, className="tarjeta-valor", style=estilo)]
     if detalle:
         contenido.append(html.Div(detalle, className="tarjeta-detalle", style={"color": color or GRIS}))
     return html.Div(contenido, className="tarjeta")
@@ -131,19 +176,26 @@ def caja_grafico(titulo, id_grafico, nota=None, figura=None):
 # ---------------------------------------------------------------------------
 # Gráficos que no dependen de los filtros
 # ---------------------------------------------------------------------------
-def grafico_mensual():
+def grafico_mensual(unidad):
+    texto, factor, _ = UNIDADES[unidad]
     mensual = media_mensual(historial)
-    figura = go.Figure(go.Scatter(x=mensual.index, y=mensual.values, mode="lines+markers",
+    figura = go.Figure(go.Scatter(x=mensual.index, y=mensual.values * factor, mode="lines+markers",
                                   line=dict(color=AZUL_CLARO, width=2.5)))
-    figura.update_layout(yaxis_title="€/MWh")
+    figura.update_layout(yaxis_title=texto)
     figura.update_xaxes(tickformat="%m/%Y")
     return dar_estilo(figura)
 
 
 def grafico_calidad():
-    figura = go.Figure(go.Bar(x=calidad["dia"], y=calidad["mae"], marker_color=AZUL))
-    figura.update_layout(xaxis_title="Días de antelación", yaxis_title="Error medio absoluto (€/MWh)")
-    return dar_estilo(figura, alto=320)
+    figura = go.Figure()
+    for (nombre, tabla), color in zip(calidades.items(), [AZUL, AMBAR, VERDE]):
+        etiqueta = nombre + (" (en uso)" if nombre == metodo_elegido else "")
+        figura.add_trace(go.Bar(x=tabla["dia"], y=tabla["mae"], name=etiqueta, marker_color=color))
+    figura.update_layout(barmode="group", xaxis_title="Días de antelación",
+                         yaxis_title="Error medio absoluto (€/MWh)")
+    dar_estilo(figura, alto=340)
+    figura.update_layout(legend=dict(orientation="h", y=1.12, x=0), margin=dict(l=10, r=10, t=50, b=10))
+    return figura
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +215,21 @@ def aviso_de_datos(ahora):
     return html.Div(mensajes)
 
 
+def texto_prevision():
+    """Frase bajo el gráfico de previsión: qué método se usa."""
+    if usa_modelo:
+        return ("Previsión de un modelo de aprendizaje automático (gradient boosting). La banda es el intervalo "
+                "del 80 %: el precio real debería caer dentro unas 8 de cada 10 veces.")
+    return ("Previsión con el método sencillo «" + metodo_elegido.lower() + "». "
+            + texto_estado_del_modelo())
+
+
+def texto_estado_del_modelo():
+    if modelo_final is None:
+        return "El modelo de aprendizaje automático necesita más historial de precios."
+    return "El modelo de aprendizaje automático no mejora a los métodos sencillos con los datos actuales."
+
+
 def pestana_panel():
     return [
         html.Div([
@@ -170,16 +237,21 @@ def pestana_panel():
                       dcc.Slider(min=1, max=7, step=1, value=7, marks={i: str(i) for i in range(1, 8)}, id="dias-prevision")]),
             html.Div([html.Label("Histórico para las medias (días)"),
                       dcc.Dropdown(options=[30, 90, 180, 365], value=90, clearable=False, id="dias-historico")]),
+            html.Div([html.Label("Unidad de precio"),
+                      dcc.RadioItems(options=[{"label": "c€/kWh (hogar)", "value": "kwh"},
+                                              {"label": "€/MWh (mercado)", "value": "mwh"}],
+                                     value="kwh", id="unidad")]),
         ], className="filtros"),
         html.Div(id="tarjetas", className="fila-tarjetas"),
-        html.Div([caja_grafico("Precio publicado y previsión", "g-prevision"),
+        html.Div([caja_grafico("Precio publicado y previsión", "g-prevision",
+texto_prevision()),
                   caja_grafico("Horas más baratas del día", "g-horas",
                                "Media histórica por hora. En verde, las 6 más baratas.")],
                  className="rejilla"),
         html.Div([caja_grafico("Mapa de colores: cuándo es más barata la luz", "g-mapa",
                                "Verde: horas baratas · Rojo: horas caras."),
                   caja_grafico("Evolución del precio medio mensual", "g-mensual",
-                               "Cada punto es la media de un mes.", grafico_mensual())],
+                               "Cada punto es la media de un mes.")],
                  className="rejilla"),
     ]
 
@@ -197,6 +269,8 @@ def pestana_planificador(proximos):
             dcc.Input(type="number", min=1, max=24, step=1, value=duracion_normal, id="duracion"),
             html.Label("Consumo total (kWh)"),
             dcc.Input(type="number", min=0.1, max=100, step=0.1, value=consumo_normal, id="consumo"),
+            html.Label("Veces que lo uso por semana"),
+            dcc.Input(type="number", min=1, max=14, step=1, value=3, id="veces"),
             html.Label("Lo necesito antes de…"),
             dcc.Dropdown(options=opciones_dia, value=dia_por_defecto, clearable=False, id="dia-limite"),
             html.Label("A las"),
@@ -209,20 +283,29 @@ def pestana_planificador(proximos):
         html.Div([html.Div(id="plan-texto"),
                   html.Div([dcc.Graph(id="g-plan", figure=go.Figure(), config={"displayModeBar": False}),
                             html.P("La franja verde es el mejor momento para poner el aparato. "
-                                   "Estimación orientativa: no incluye peajes por periodo, cargos ni impuestos.",
+                                   "Estimación orientativa: no incluye peajes por periodo, cargos ni impuestos. "
+                                   "El ahorro anual supone el mismo ahorro todas las semanas.",
                                    className="nota")], className="caja")]),
     ], className="columnas-planificador")]
 
 
 def pestana_calidad():
+    primero, ultimo = calidad.iloc[0], calidad.iloc[-1]
+    tarjetas = [tarjeta("Error medio a 1 día", escribir_numero(primero["mae"], 1) + " €/MWh",
+                        escribir_numero(primero["pct"], 0) + " % del precio medio"),
+                tarjeta("Error medio a 7 días", escribir_numero(ultimo["mae"], 1) + " €/MWh",
+                        escribir_numero(ultimo["pct"], 0) + " % del precio medio"),
+                tarjeta("Método en uso", metodo_elegido)]
+    if cobertura is not None:
+        tarjetas.append(tarjeta("Intervalo del 80 % del modelo", escribir_numero(cobertura, 0) + " % de aciertos",
+                                "ideal: cerca del 80 %"))
+    clase = "fila-tarjetas" if len(tarjetas) == 4 else "fila-tarjetas tres"
     return [
-        html.Div([tarjeta("Error medio a 1 día", format(calidad["mae"].iloc[0], ".1f") + " €/MWh"),
-                  tarjeta("Error medio a 7 días", format(calidad["mae"].iloc[-1], ".1f") + " €/MWh")],
-                 className="fila-tarjetas dos"),
+        html.Div(tarjetas, className=clase),
         html.Div([dcc.Graph(figure=grafico_calidad(), config={"displayModeBar": False}),
-                  html.P("Error del método de referencia (misma hora de la semana anterior) en 40 previsiones "
-                         "de los últimos 4 meses. El modelo de aprendizaje automático tendrá que superar "
-                         "estas barras.", className="nota")], className="caja"),
+                  html.P("Error de cada método en 40 previsiones de los últimos 4 meses. El modelo de aprendizaje "
+                         "automático se entrena solo con datos anteriores a esas fechas, así que no hace trampas. "
+                         "La web usa el que menos se equivoca.", className="nota")], className="caja"),
     ]
 
 
@@ -248,8 +331,8 @@ def crear_layout():
             dcc.Tab(label="Planificador", children=pestana_planificador(proximos)),
             dcc.Tab(label="Calidad de la previsión", children=pestana_calidad()),
         ]),
-        html.P("La previsión actual copia los precios de la misma hora de la semana anterior. "
-               "El modelo de aprendizaje automático llegará más adelante.", className="nota"),
+        html.P("La previsión actual usa «" + metodo_elegido.lower() + "», el método de menor error en las "
+               "pruebas." + ("" if usa_modelo else " " + texto_estado_del_modelo()), className="nota"),
     ], className="pagina")
 
 
@@ -266,10 +349,13 @@ app.layout = crear_layout
     Output("g-prevision", "figure"),
     Output("g-horas", "figure"),
     Output("g-mapa", "figure"),
+    Output("g-mensual", "figure"),
     Input("dias-prevision", "value"),
     Input("dias-historico", "value"),
+    Input("unidad", "value"),
 )
-def actualizar_panel(dias_prevision, dias_historico):
+def actualizar_panel(dias_prevision, dias_historico, unidad):
+    texto_unidad, factor, decimales = UNIDADES[unidad]
     _, proximos = precios_proximos()
     previstos = proximos.iloc[: dias_prevision * 24]
     proximas_24 = proximos.iloc[:24].dropna()
@@ -277,36 +363,43 @@ def actualizar_panel(dias_prevision, dias_historico):
     cambio = (media_24 / historial.iloc[-720:].mean() - 1) * 100
 
     tarjetas = [
-        tarjeta("Precio próxima hora", str(round(proximos.dropna().iloc[0])) + " €/MWh"),
+        tarjeta("Precio próxima hora", escribir_precio(proximos.dropna().iloc[0], unidad)),
         tarjeta("Hora más barata (24 h)", proximas_24.idxmin().strftime("%H:%M"),
-                str(round(proximas_24.min())) + " €/MWh", VERDE),
+                escribir_precio(proximas_24.min(), unidad), VERDE),
         tarjeta("Hora más cara (24 h)", proximas_24.idxmax().strftime("%H:%M"),
-                str(round(proximas_24.max())) + " €/MWh", ROJO),
-        tarjeta("Media de las próximas 24 h", str(round(media_24)) + " €/MWh",
+                escribir_precio(proximas_24.max(), unidad), ROJO),
+        tarjeta("Media de las próximas 24 h", escribir_precio(media_24, unidad),
                 format(cambio, "+.0f") + " % vs últimos 30 días", ROJO if cambio > 0 else VERDE),
     ]
 
     # Línea: lo ya publicado (última semana) y lo previsto
     ultima_semana = historial.iloc[-168:]
     linea = go.Figure()
-    linea.add_trace(go.Scatter(x=ultima_semana.index, y=ultima_semana, name="Precio ya publicado",
+    linea.add_trace(go.Scatter(x=ultima_semana.index, y=ultima_semana * factor, name="Precio ya publicado",
                                line=dict(color=AZUL, width=2.5)))
-    linea.add_trace(go.Scatter(x=previstos.index, y=previstos, name="Precio previsto",
+    if banda is not None:  # intervalo del 80 % (solo con el modelo de aprendizaje automático)
+        franja = banda.reindex(previstos.index).dropna()
+        linea.add_trace(go.Scatter(x=franja.index, y=franja["alto"] * factor, line=dict(width=0),
+                                   showlegend=False, hoverinfo="skip"))
+        linea.add_trace(go.Scatter(x=franja.index, y=franja["bajo"] * factor, fill="tonexty",
+                                   fillcolor="rgba(217,119,6,0.18)", line=dict(width=0),
+                                   name="Intervalo del 80 %", hoverinfo="skip"))
+    linea.add_trace(go.Scatter(x=previstos.index, y=previstos * factor, name="Previsión",
                                line=dict(color=AMBAR, width=2.5, dash="dot")))
     linea.add_shape(type="line", x0=previstos.index[0], x1=previstos.index[0],
                     y0=0, y1=1, yref="paper", line=dict(color=GRIS, dash="dash"))
-    linea.update_layout(yaxis_title="€/MWh", hovermode="x unified")
+    linea.update_layout(yaxis_title=texto_unidad, hovermode="x unified")
     linea.update_xaxes(tickformat="%d/%m")
 
     # Barras: precio medio de cada hora del día
     por_hora = media_por_hora(historial, dias_historico)
     baratas = por_hora.nsmallest(6).index
     colores = [VERDE if hora in baratas else AZUL_CLARO for hora in por_hora.index]
-    barras = go.Figure(go.Bar(x=list(por_hora.index), y=por_hora.values, marker_color=colores))
-    barras.update_layout(xaxis_title="Hora del día", yaxis_title="€/MWh")
+    barras = go.Figure(go.Bar(x=list(por_hora.index), y=por_hora.values * factor, marker_color=colores))
+    barras.update_layout(xaxis_title="Hora del día", yaxis_title=texto_unidad)
 
     # Mapa de colores: una fila por día y una columna por hora
-    tabla = previstos.rename("precio").to_frame()
+    tabla = (previstos * factor).rename("precio").to_frame()
     tabla["dia"] = [escribir_dia(fecha) for fecha in tabla.index]
     tabla["hora"] = tabla.index.hour
     cuadricula = tabla.pivot_table(index="dia", columns="hora", values="precio", sort=False)
@@ -316,12 +409,12 @@ def actualizar_panel(dias_prevision, dias_historico):
         x=[int(hora) for hora in cuadricula.columns],
         y=list(cuadricula.index),
         colorscale=[[0, VERDE], [0.5, "#f2c14e"], [1, ROJO]],
-        colorbar=dict(title="€/MWh"),
-        hovertemplate="%{y} %{x}:00 → %{z:.0f} €/MWh<extra></extra>",
+        colorbar=dict(title=texto_unidad),
+        hovertemplate="%{y} %{x}:00 → %{z:." + str(decimales) + "f} " + texto_unidad + "<extra></extra>",
     ))
     mapa.update_layout(xaxis_title="Hora del día", yaxis=dict(autorange="reversed"))
 
-    return tarjetas, dar_estilo(linea), dar_estilo(barras), dar_estilo(mapa)
+    return tarjetas, dar_estilo(linea), dar_estilo(barras), dar_estilo(mapa), grafico_mensual(unidad)
 
 
 @app.callback(Output("duracion", "value"), Output("consumo", "value"), Input("aparato", "value"))
@@ -339,9 +432,10 @@ def rellenar_aparato(aparato):
     Input("dia-limite", "value"),
     Input("hora-limite", "value"),
     Input("peso", "value"),
+    Input("veces", "value"),
 )
-def actualizar_plan(duracion, consumo, dia_limite, hora_limite, peso):
-    if not duracion or not consumo or dia_limite is None or hora_limite is None:
+def actualizar_plan(duracion, consumo, dia_limite, hora_limite, peso, veces):
+    if not duracion or not consumo or not veces or dia_limite is None or hora_limite is None:
         return html.Div("Rellena todos los campos.", className="aviso"), go.Figure()
 
     _, proximos = precios_proximos()
@@ -356,16 +450,18 @@ def actualizar_plan(duracion, consumo, dia_limite, hora_limite, peso):
     texto = html.Div([
         html.Div("Mejor momento para empezar", className="tarjeta-titulo"),
         html.Div(escribir_dia(mejor) + " a las " + mejor.strftime("%H:%M"), className="momento"),
-        html.Div([tarjeta("Ahorro estimado (frente a las 21:00)", escribir_euros(plan["ahorro"])),
-                  tarjeta("Coste de la energía (parte de mercado)", escribir_euros(plan["coste_mejor"]))],
-                 className="fila-tarjetas dos"),
+        html.Div([tarjeta("Coste de la energía (parte de mercado)", escribir_dinero(plan["coste_mejor"])),
+                  tarjeta("Ahorro por uso (frente a las 21:00)", escribir_dinero(plan["ahorro"])),
+                  tarjeta("Ahorro al año (" + str(int(veces)) + " veces por semana)",
+                          escribir_dinero(ahorro_al_ano(plan["ahorro"], int(veces))), color=None)],
+                 className="fila-tarjetas tres"),
     ])
 
     ventana = proximos.loc[:limite]
-    figura = go.Figure(go.Scatter(x=ventana.index, y=ventana, line=dict(color=AZUL, width=2.5), name="Precio"))
+    figura = go.Figure(go.Scatter(x=ventana.index, y=ventana * 0.1, line=dict(color=AZUL, width=2.5), name="Precio"))
     figura.add_vrect(x0=mejor, x1=mejor + pd.Timedelta(hours=int(duracion)),
                      fillcolor=VERDE, opacity=0.3, line_width=0)
-    figura.update_layout(yaxis_title="€/MWh", showlegend=False)
+    figura.update_layout(yaxis_title="c€/kWh", showlegend=False)
     figura.update_xaxes(tickformat="%d/%m %H:%M")
     return texto, dar_estilo(figura, alto=300)
 

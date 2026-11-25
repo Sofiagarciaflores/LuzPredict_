@@ -54,7 +54,9 @@ Se despliega en Render como servicio web de Python (ver `render.yaml`): instala 
 
 ## Decisiones técnicas
 
-- **Previsión actual:** copia los precios de la misma hora de la semana anterior. Es el método de referencia, no un modelo de aprendizaje automático.
+- **Previsión:** se comparan tres métodos en el pasado (misma hora de la semana anterior, media de las 4 semanas anteriores y un modelo de aprendizaje automático) y la web usa el que menos se equivoca. El modelo de aprendizaje automático solo se usa si de verdad gana a los dos sencillos.
+- **Modelo:** gradient boosting (scikit-learn, `HistGradientBoostingRegressor`) con tres versiones (percentil 10, mediana y percentil 90). La mediana es la previsión y los otros dos forman el intervalo del 80 %, que se calibra con datos que el modelo no ha visto (calibración conforme). Se regulariza fuerte porque los precios son muy ruidosos.
+- **Examen limpio:** el modelo que se evalúa se entrena con datos anteriores a las pruebas. La pestaña *Calidad* muestra su error y cuántas veces el precio real cae dentro del intervalo (ideal: cerca del 80 %).
 - **Sin fuga de información:** la previsión y su evaluación solo usan datos anteriores al momento de predecir.
 - **PVPC:** el planificador usa un peso del 45 % del mercado diario (2026). Es una aproximación: no incluye peajes por periodo, cargos ni impuestos.
 - **Precios negativos o cero:** se mantienen, porque ocurren de verdad en el mercado.
@@ -67,7 +69,8 @@ Se despliega en Render como servicio web de Python (ver `render.yaml`): instala 
 | 1 | Panel, planificador y previsión de referencia con datos de demostración | Hecho |
 | 2 | Datos reales de REData y descarga diaria automática | Hecho (falta la primera descarga real) |
 | 3 | Despliegue de la web en Render | Pendiente |
-| 4 | Modelo LightGBM con intervalo de predicción al 80 % y tiempo (Open-Meteo) | Pendiente |
+| 4 | Modelo de aprendizaje automático con intervalo al 80 % | Hecho (probado con datos de demostración; falta reevaluarlo con datos reales) |
+| 4b | Añadir el tiempo (Open-Meteo) como variable del modelo | Pendiente |
 | 5 | Planificador calibrado con el PVPC real, pulido y presentación | Pendiente |
 
 ## Créditos
