@@ -1,11 +1,22 @@
-name: CI
+name: CI y datos
 
+# - Al subir cambios: pasa los tests.
+# - Cada día a las 14:30 UTC (los precios de mañana ya están publicados): descarga
+#   los precios nuevos y los guarda en data/precios.csv.
+# - A mano: pestaña Actions > CI y datos > Run workflow (descarga los datos).
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "30 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   tests:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,3 +26,24 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - run: pytest -q
+
+  datos:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas numpy requests
+      - name: Descargar precios de Red Eléctrica
+        run: python actualizar_datos.py
+      - name: Guardar los datos nuevos en el repositorio
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add data/precios.csv
+          if ! git diff --cached --quiet; then
+            git commit -m "Actualiza precios (automático)"
+            git push
+          fi

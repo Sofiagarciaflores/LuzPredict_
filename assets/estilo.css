@@ -1,0 +1,55 @@
+/* Estilo de LuzPredict. Dash carga solo todos los .css de la carpeta assets. */
+:root { --Dash-Fill-Interactive-Strong: #0b5cab; }  /* color de los controles de Dash */
+
+body {
+  margin: 0;
+  background: #f5f7fa;
+  color: #0b2545;
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+}
+h1, h4 { font-family: Georgia, "Times New Roman", serif; }
+
+.pagina { max-width: 1240px; margin: 0 auto; padding: 24px; }
+
+.cabecera {
+  background-image: linear-gradient(90deg, rgba(8,26,51,0.94) 0%, rgba(8,26,51,0.80) 42%, rgba(8,26,51,0.10) 100%),
+                    url("/assets/paneles.jpg");
+  background-size: cover;
+  background-position: center;
+  border-radius: 6px;
+  padding: 40px 48px;
+  margin-bottom: 16px;
+}
+.cabecera h1 { color: #fff; font-size: 3rem; margin: 0 0 8px 0; }
+.cabecera p { color: #dbe6f3; font-size: 1.1rem; max-width: 620px; margin: 0; line-height: 1.5; }
+
+.aviso { background: #fff4e0; border-left: 4px solid #d97706; color: #5a3a00;
+         padding: 12px 16px; border-radius: 4px; margin: 12px 0; }
+.nota { color: #6b7785; font-size: 0.9rem; margin: 8px 0; }
+
+.filtros { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; margin: 20px 0 8px 0; }
+.filtros label, .formulario label { display: block; font-size: 0.9rem; margin: 12px 0 6px 0; }
+
+.fila-tarjetas { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 16px 0; }
+.fila-tarjetas.dos { grid-template-columns: repeat(2, 1fr); }
+.tarjeta { background: #fff; border: 1px solid #dfe5ec; border-radius: 8px; padding: 16px; }
+.tarjeta-titulo { font-size: 0.9rem; color: #0b2545; margin-bottom: 6px; }
+.tarjeta-valor { font-size: 2rem; font-weight: 500; }
+.tarjeta-detalle { font-size: 0.85rem; margin-top: 6px; font-weight: 600; }
+
+.rejilla { display: grid; grid-template-columns: 3fr 2fr; gap: 16px; margin-bottom: 16px; }
+.caja { background: #fff; border: 1px solid #dfe5ec; border-radius: 8px; padding: 8px 16px 12px 16px; }
+.caja h4 { font-size: 1.15rem; margin: 12px 0 4px 0; }
+
+.columnas-planificador { display: grid; grid-template-columns: 1fr 2fr; gap: 32px; margin-top: 16px; }
+.formulario input[type="number"] { width: 100%; box-sizing: border-box; padding: 8px; font-size: 1rem;
+                                   border: 1px solid #c7d0db; border-radius: 4px; }
+.momento { font-family: Georgia, serif; font-size: 2.2rem; margin: 4px 0 8px 0; }
+
+.tab { padding: 10px 18px !important; }
+.tab--selected { border-top: 3px solid #0b5cab !important; color: #0b5cab !important; font-weight: 600; }
+
+@media (max-width: 900px) {
+  .rejilla, .columnas-planificador, .filtros { grid-template-columns: 1fr; }
+  .fila-tarjetas { grid-template-columns: repeat(2, 1fr); }
+}

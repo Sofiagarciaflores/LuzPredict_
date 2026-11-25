@@ -3,14 +3,14 @@
 Cómo usarlo, desde la carpeta del proyecto:
 
     python actualizar_datos.py              # primera vez: descarga desde 2021
-    python actualizar_datos.py 2023-01-01   # elegir la fecha de inicio
+    python actualizar_datos.py 2026-10-01   # elegir la fecha de inicio (más rápido para probar)
     python actualizar_datos.py              # después: solo descarga lo que falta
 
-También se ejecuta solo cada día en GitHub (ver .github/workflows/actualizar-datos.yml).
+También se ejecuta solo cada día en GitHub (ver .github/workflows/ci.yml).
 """
 import sys
 
-from luzpredict.datos import RUTA_CSV, actualizar_csv
+from funciones import RUTA_CSV, actualizar_csv
 
 desde = "2021-01-01"
 if len(sys.argv) > 1:

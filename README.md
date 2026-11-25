@@ -1,85 +1,75 @@
 # LuzPredict
 
-Previsión a 7 días del precio de la luz y planificador de consumo para el hogar.
+Panel web con la previsión a 7 días del precio de la luz en España y un planificador que dice a qué hora conviene poner un electrodoméstico.
 
 Proyecto de la asignatura *Desarrollo de Aplicaciones para la Visualización de Datos* (ICAI, Universidad Pontificia Comillas).
 
-## Descripción
+## Qué hace
 
-Muchos hogares tienen la tarifa regulada (PVPC), cuyo precio cambia cada hora. Las webs existentes muestran el precio de hoy y mañana, que ya está publicado. LuzPredict añade una **previsión de 2 a 7 días** con un modelo de aprendizaje automático, un **rango de fiabilidad** y un **planificador** que dice a qué hora conviene poner la lavadora o cargar el coche y cuánto se ahorra.
+- **Panel:** precio de la próxima hora, hora más barata y más cara de las próximas 24 h, previsión a 7 días, mejores horas del día, mapa de colores y evolución mensual.
+- **Planificador:** elige un electrodoméstico y una hora límite; la web busca el mejor momento y calcula el ahorro frente a empezar a las 21:00.
+- **Calidad de la previsión:** cuánto se equivoca la previsión según los días de antelación.
 
-## Objetivos
-
-1. Predecir el precio horario del mercado mayorista (€/MWh) a 7 días vista con un error menor que el método simple de referencia.
-2. Dar un intervalo de predicción al 80 % cuya cobertura real se mida y se muestre.
-3. Traducir la previsión a ahorro en euros para el PVPC (45 % del precio depende del mercado diario en 2026; el resto, de mercados a plazo).
-4. Publicar una web clara, interactiva y actualizada cada día.
-
-## Plan de trabajo
-
-| Sprint | Contenido | Estado |
-|---|---|---|
-| 0 | Esqueleto del repo, tests, CI, modelo de referencia, app con datos de demostración | Hecho |
-| 1 | Datos reales: REData (precios, promedio horario de los cuartos de hora desde oct-2025) | Hecho (falta la primera descarga real) |
-| 1b | Open-Meteo (previsiones pasadas, no reanálisis) como variables del modelo | Pendiente |
-| 2 | Modelo LightGBM por horizonte, regresión por cuantiles (10 %-90 %), backtesting y cobertura | Pendiente |
-| 3 | App con datos reales desplegada en Streamlit Community Cloud | Pendiente |
-| 4 | Planificador calibrado con el PVPC de ESIOS, panel de calidad, diseño final | Pendiente |
-| 5 | Pulido, documentación y ensayo de la exposición (5 min + 2 de preguntas) | Pendiente |
-
-## Estructura
+## Archivos
 
 ```
-luzpredict/            funciones del proyecto
-  datos.py             descarga de precios (REData), limpieza y guardado en CSV; pasa 15 min a horas
-  sinteticos.py        precios de demostración (inventados)
-  referencia.py        método simple de comparación y su evaluación
-  variables.py         "pistas" para el modelo (calendario y precios pasados)
-  planificador.py      busca la mejor hora para un electrodoméstico
-streamlit_app.py       la aplicación web (4 pestañas)
-actualizar_datos.py    descarga los precios reales y actualiza data/precios.csv
-.github/workflows/     tests (ci.yml) y descarga diaria de datos (actualizar-datos.yml)
-assets/                foto de cabecera (paneles solares) e ilustración de ahorro (SVG)
-static/fonts/          tipografías Fraunces y DM Sans (licencia SIL OFL)
-tests/                 pruebas automáticas (se ejecutan con `pytest`)
-data/precios.csv       precios horarios reales (€/MWh), se sube a GitHub
+app.py                 la web, hecha con Dash (panel, planificador y calidad)
+funciones.py           todo el cálculo: datos, previsión, resúmenes y planificador
+actualizar_datos.py    descarga los precios reales y los guarda en data/precios.csv
+test_funciones.py      pruebas automáticas (pytest)
+requirements.txt       librerías necesarias
+render.yaml            configuración del despliegue en Render
+assets/estilo.css      colores y diseño de la web
+assets/paneles.jpg     foto de la cabecera
+.github/workflows/     tests en cada subida y descarga diaria de datos
+data/precios.csv       precios horarios reales (se crea al descargar)
 ```
-
-### Cómo se conectan las piezas
-
-1. `datos.py` lee `data/precios.csv` (precios reales por hora). Si no existe, `sinteticos.py` crea precios de demostración.
-2. `referencia.py` predice la próxima semana y mide cuánto se equivoca.
-3. `planificador.py` usa esa previsión para elegir la hora más barata.
-4. `streamlit_app.py` llama a todo lo anterior y lo dibuja con gráficos.
 
 ## Cómo ejecutarlo
 
+Necesita Python 3.10 o superior.
+
 ```bash
-python -m venv .venv && source .venv/bin/activate   # en Windows: .venv\Scripts\activate
+python3 -m venv .venv
+source .venv/bin/activate          # en Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-pytest -q                      # pruebas
-streamlit run streamlit_app.py # app en http://localhost:8501
+python actualizar_datos.py 2026-10-01   # descarga precios reales (prueba corta)
+python app.py                          # web en http://127.0.0.1:8050
+pytest -q                               # pruebas
 ```
+
+Sin `data/precios.csv`, la web usa datos de demostración (inventados) y lo avisa en pantalla.
+
+## Despliegue
+
+Se despliega en Render como servicio web de Python (ver `render.yaml`): instala `requirements.txt` y arranca con `gunicorn app:server`.
 
 ## Datos
 
-- **Fuente:** API pública de Red Eléctrica de España, REData (`apidatos.ree.es`), mercado diario (spot) y PVPC.
-- **Primera descarga** (tarda unos minutos, descarga desde 2021): en GitHub, pestaña *Actions* → *Actualizar datos* → *Run workflow*. O en tu ordenador: `python actualizar_datos.py`.
-- **Después** la acción se ejecuta sola cada día y guarda el resultado en `data/precios.csv`.
-- **Aviso:** los nombres de las series de la API (`spot`, `pvpc`) y las unidades están sin verificar contra la respuesta real; si la primera descarga falla, el error indica qué series ha encontrado.
+- **Fuente:** API pública de Red Eléctrica de España, REData (`apidatos.ree.es`): mercado diario (spot) y PVPC. Sin clave.
+- **Primera descarga:** `python actualizar_datos.py` (desde 2021) o, en GitHub, *Actions → CI y datos → Run workflow*.
+- **Después:** la acción de GitHub se ejecuta cada día y guarda los precios nuevos en `data/precios.csv`.
+- **Aviso:** los nombres de las series de la API (`spot`, `pvpc`) están sin confirmar contra la respuesta real. Si la primera descarga falla, el error enseña qué series ha encontrado.
+- Desde octubre de 2025 el mercado da precios cada 15 minutos; se promedian a horas.
 
 ## Decisiones técnicas
 
-- **Sin fuga de información:** con horizonte de 7 días solo se usan retardos de precio de 168 h o más, y variables meteorológicas de *previsiones* pasadas.
+- **Previsión actual:** copia los precios de la misma hora de la semana anterior. Es el método de referencia, no un modelo de aprendizaje automático.
+- **Sin fuga de información:** la previsión y su evaluación solo usan datos anteriores al momento de predecir.
+- **PVPC:** el planificador usa un peso del 45 % del mercado diario (2026). Es una aproximación: no incluye peajes por periodo, cargos ni impuestos.
 - **Precios negativos o cero:** se mantienen, porque ocurren de verdad en el mercado.
-- **Cambio de hora:** series con zona horaria (`Europe/Madrid`); los días de cambio tienen 23 o 25 horas.
+- **Cambio de hora:** series con zona horaria `Europe/Madrid`; los días de cambio tienen 23 o 25 horas.
+
+## Plan de trabajo
+
+| Paso | Contenido | Estado |
+|---|---|---|
+| 1 | Panel, planificador y previsión de referencia con datos de demostración | Hecho |
+| 2 | Datos reales de REData y descarga diaria automática | Hecho (falta la primera descarga real) |
+| 3 | Despliegue de la web en Render | Pendiente |
+| 4 | Modelo LightGBM con intervalo de predicción al 80 % y tiempo (Open-Meteo) | Pendiente |
+| 5 | Planificador calibrado con el PVPC real, pulido y presentación | Pendiente |
 
 ## Créditos
 
-- Tipografías: Fraunces y DM Sans (licencia SIL OFL, en `static/fonts/`).
-- Ilustración de ahorro: dibujo propio.
-- Foto de cabecera (`assets/hero_paneles.jpg`): **pendiente de confirmar la fuente y la licencia**. Antes de la entrega final, sustituirla por una foto de licencia libre (Unsplash, Pexels o Pixabay) e indicar aquí el autor y el enlace.
-
-## Estado actual
-
-La versión 0.2 usa precios **reales** de REData cuando existe `data/precios.csv`; si no, datos de demostración con aviso. La previsión sigue siendo el método de referencia (el modelo LightGBM llega en el Sprint 2). Ver [CHANGELOG](CHANGELOG.md).
+Foto de cabecera (`assets/paneles.jpg`): **pendiente de confirmar la fuente y la licencia**. Antes de la entrega final, sustituirla por una foto de licencia libre (Unsplash, Pexels o Pixabay) e indicar aquí el autor y el enlace.
